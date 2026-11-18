@@ -255,7 +255,10 @@ func ChangeTargetBranch(ctx context.Context, pr *issues_model.PullRequest, doer 
 		OldRef: oldBranch,
 		NewRef: targetBranch,
 	}
-	if _, err = issues_model.CreateComment(ctx, options); err != nil {
+	_, err = issues_model.CreateComment(ctx, options)
+	// The base branch is persisted, so notify even without the comment.
+	notify_service.PullRequestChangeTargetBranch(ctx, doer, pr, oldBranch)
+	if err != nil {
 		return fmt.Errorf("CreateChangeTargetBranchComment: %w", err)
 	}
 
@@ -493,6 +496,86 @@ func RetargetChildrenOnMerge(ctx context.Context, doer *user_model.User, pr *iss
 	return nil
 }
 
+// HandleDeletedBranch retargets the children of a deleted merged branch and closes the pulls from and onto it, unless the branch exists again.
+func HandleDeletedBranch(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, gitRepo *git.Repository, branch, oldCommitID string) {
+	exists, err := gitRepo.HasBranch(branch)
+	if exists {
+		return
+	}
+	// Children are closed only when their retarget was decided and did not fail; otherwise they stay open.
+	closeChildren := err == nil
+	if err != nil {
+		log.Error("check deleted branch %s in %-v: %v", branch, repo, err)
+	} else if dbBranch, err := git_model.GetBranch(ctx, repo.ID, branch); err != nil && !git_model.IsErrBranchNotExist(err) {
+		log.Error("get deleted branch %s in %-v: %v", branch, repo, err)
+		closeChildren = false
+	} else if err != nil || dbBranch.IsDeleted {
+		// The latest deleted tip decides, so a late event acts as the latest one would; a row that does not contain the event's tip lags behind it and falls back to closing.
+		deletedTip := oldCommitID
+		if err == nil {
+			deletedTip = dbBranch.CommitID
+		}
+		if contained, err := containsCommit(ctx, gitRepo.Path, deletedTip, oldCommitID); err != nil {
+			log.Error("check deleted tip %s of %s in %-v: %v", deletedTip, branch, repo, err)
+			closeChildren = false
+		} else if contained {
+			if err := retargetChildrenOfDeletedBranch(ctx, doer, gitRepo, repo.ID, branch, deletedTip); err != nil {
+				log.Error("retarget children of deleted branch %s in %-v failed: %v", branch, repo, err)
+				closeChildren = false
+			}
+		}
+	}
+
+	if exists, err = gitRepo.HasBranch(branch); exists {
+		return
+	} else if err != nil {
+		log.Error("check deleted branch %s in %-v: %v", branch, repo, err)
+		closeChildren = false
+	}
+	if err := closeBranchPulls(ctx, doer, repo.ID, branch, closeChildren); err != nil {
+		log.Error("close related pull request failed: %v", err)
+	}
+}
+
+// containsCommit reports whether commitID is tip or one of its ancestors in the repository at repoPath.
+func containsCommit(ctx context.Context, repoPath, tip, commitID string) (bool, error) {
+	if commitID == tip {
+		return true, nil
+	}
+	_, _, err := git.NewCommand(ctx, "merge-base", "--is-ancestor").AddDynamicArguments(commitID, tip).RunStdString(&git.RunOpts{Dir: repoPath})
+	if git.IsErrorExitCode(err, 1) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// retargetChildrenOfDeletedBranch retargets the children of a deleted branch when no open pull request uses it as head and its tip is the head of merged pull requests into a single base.
+func retargetChildrenOfDeletedBranch(ctx context.Context, doer *user_model.User, gitRepo *git.Repository, repoID int64, branch, deletedCommitID string) error {
+	if !setting.Repository.PullRequest.RetargetChildrenOnMerge {
+		return nil
+	}
+	if children, err := issues_model.GetUnmergedPullRequestsByBaseInfo(ctx, repoID, branch); err != nil || len(children) == 0 {
+		return err
+	}
+	if open, err := issues_model.HasUnmergedPullRequestsByHeadInfo(ctx, repoID, branch); err != nil || open {
+		return err
+	}
+	prs, err := issues_model.GetMergedSameRepoPullRequestsByHeadInfo(ctx, repoID, branch, deletedCommitID)
+	if err != nil || len(prs) == 0 {
+		return err
+	}
+	merged := prs[0]
+	for _, pr := range prs[1:] {
+		if pr.BaseBranch != merged.BaseBranch {
+			return nil
+		}
+	}
+	if exists, err := gitRepo.HasBranch(merged.BaseBranch); err != nil || !exists {
+		return err
+	}
+	return RetargetChildrenOnMerge(ctx, doer, merged)
+}
+
 // RetargetBranchPulls change target branch for all pull requests whose base branch is the branch
 // Both branch and targetBranch must be in the same repo (for security reasons)
 func RetargetBranchPulls(ctx context.Context, doer *user_model.User, repoID int64, branch, targetBranch string) error {
@@ -501,7 +584,12 @@ func RetargetBranchPulls(ctx context.Context, doer *user_model.User, repoID int6
 		return err
 	}
 
-	if err := issues_model.PullRequestList(prs).LoadAttributes(ctx); err != nil {
+	issues, err := issues_model.PullRequestList(prs).LoadIssues(ctx)
+	if err != nil {
+		return err
+	}
+	// The notifiers read the poster for the payload permissions.
+	if err := issues.LoadPosters(ctx); err != nil {
 		return err
 	}
 
@@ -522,19 +610,20 @@ func RetargetBranchPulls(ctx context.Context, doer *user_model.User, repoID int6
 	return nil
 }
 
-// CloseBranchPulls close all the pull requests who's head branch is the branch
-func CloseBranchPulls(ctx context.Context, doer *user_model.User, repoID int64, branch string) error {
+// closeBranchPulls closes the pull requests whose head branch is the branch and, with closeChildren, those whose base branch is the branch.
+func closeBranchPulls(ctx context.Context, doer *user_model.User, repoID int64, branch string, closeChildren bool) error {
 	prs, err := issues_model.GetUnmergedPullRequestsByHeadInfo(ctx, repoID, branch)
 	if err != nil {
 		return err
 	}
 
-	prs2, err := issues_model.GetUnmergedPullRequestsByBaseInfo(ctx, repoID, branch)
-	if err != nil {
-		return err
+	if closeChildren {
+		children, err := issues_model.GetUnmergedPullRequestsByBaseInfo(ctx, repoID, branch)
+		if err != nil {
+			return err
+		}
+		prs = append(prs, children...)
 	}
-
-	prs = append(prs, prs2...)
 	if err := prs.LoadAttributes(ctx); err != nil {
 		return err
 	}

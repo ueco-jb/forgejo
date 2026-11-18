@@ -21,7 +21,8 @@ const BranchPrefix = "refs/heads/"
 
 // IsBranchExist returns true if given branch exists in the repository.
 func IsBranchExist(ctx context.Context, repoPath, name string) bool {
-	return NewCommand(ctx, "show-ref", "--verify", "--quiet").AddDashesAndList(BranchPrefix+name).Run(&RunOpts{Dir: repoPath}) == nil
+	exists, _ := hasBranch(ctx, repoPath, name)
+	return exists
 }
 
 // Branch represents a Git branch.
@@ -208,6 +209,19 @@ func (repo *Repository) IsBranchExist(name string) bool {
 	}
 
 	return repo.IsReferenceExist(BranchPrefix + name)
+}
+
+// HasBranch reports whether the branch exists; unlike the IsBranchExist method it reads the ref fresh and returns a failed read as an error.
+func (repo *Repository) HasBranch(name string) (bool, error) {
+	return hasBranch(repo.Ctx, repo.Path, name)
+}
+
+func hasBranch(ctx context.Context, repoPath, name string) (bool, error) {
+	_, _, err := NewCommand(ctx, "show-ref", "--verify", "--quiet").AddDashesAndList(BranchPrefix + name).RunStdString(&RunOpts{Dir: repoPath})
+	if IsErrorExitCode(err, 1) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // GetBranchNames returns branches from the repository, skipping "skip" initial branches and

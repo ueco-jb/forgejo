@@ -388,6 +388,16 @@ func doMergeAndPush(ctx context.Context, pr *issues_model.PullRequest, doer *use
 		pr.ID,
 	)
 
+	// The base push marks the pull request merged, so its head is recorded first.
+	if pushTrigger == repo_module.PushTriggerPRMergeToBase {
+		if pr.MergedHeadCommitID, err = git.GetFullCommitID(ctx, mergeCtx.tmpBasePath, trackingBranch); err != nil {
+			return "", fmt.Errorf("unable to get the merged head of %v: %w", pr, err)
+		}
+		if err := pr.UpdateColsIfNotMerged(ctx, "merged_head_commit_id"); err != nil {
+			return "", fmt.Errorf("unable to record the merged head of %v: %w", pr, err)
+		}
+	}
+
 	mergeCtx.env = append(mergeCtx.env, repo_module.EnvPushTrigger+"="+string(pushTrigger))
 	pushCmd := git.NewCommand(ctx, "push", "origin").AddDynamicArguments(baseBranch + ":" + git.BranchPrefix + pr.BaseBranch)
 

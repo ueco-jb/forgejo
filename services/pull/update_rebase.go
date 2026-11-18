@@ -5,6 +5,7 @@ package pull
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,21 +18,48 @@ import (
 	"forgejo.org/modules/setting"
 )
 
-// updateHeadByRebaseOnToBase handles updating a PR's head branch by rebasing it on the PR current base branch
-func updateHeadByRebaseOnToBase(ctx context.Context, pr *issues_model.PullRequest, doer *user_model.User) error {
+// RebaseOnto rebases the head branch of pr onto its base branch, replaying only the commits after upstream (a full commit ID, or empty for the base branch), and pushes it with a lease on the fetched head.
+// It fails with models.ErrSHADoesNotMatch if expectedHeadSHA is given and the head differs, and with git.ErrPushOutOfDate if the head moves before the push.
+// The caller checks IsUserAllowedToUpdate.
+func RebaseOnto(ctx context.Context, pr *issues_model.PullRequest, doer *user_model.User, upstream, expectedHeadSHA string) error {
+	if pr.Flow == issues_model.PullRequestFlowAGit {
+		return errors.New("update of agit flow pull request's head branch is unsupported")
+	}
+	if upstream != "" {
+		if _, err := git.NewIDFromString(upstream); err != nil {
+			return fmt.Errorf("upstream is not a full commit ID: %w", err)
+		}
+	}
+
+	defer pullWorkingPool.Lock(fmt.Sprint(pr.ID))()
+
+	defer func() {
+		AddTestPullRequestTask(ctx, doer, pr.BaseRepoID, pr.BaseBranch, false, "", "", 0)
+	}()
+
+	return rebaseHeadOnto(ctx, pr, doer, upstream, expectedHeadSHA)
+}
+
+// rebaseHeadOnto does the work of RebaseOnto; the caller holds the pull request lock.
+func rebaseHeadOnto(ctx context.Context, pr *issues_model.PullRequest, doer *user_model.User, upstream, expectedHeadSHA string) error {
 	// "Clone" base repo and add the cache headers for the head repo and branch
-	mergeCtx, cancel, err := createTemporaryRepoForMerge(ctx, pr, doer, "")
+	mergeCtx, cancel, err := createTemporaryRepoForMerge(ctx, pr, doer, expectedHeadSHA)
 	if err != nil {
 		return err
 	}
 	defer cancel()
+
+	leaseSHA, err := git.GetFullCommitID(ctx, mergeCtx.tmpBasePath, git.BranchPrefix+trackingBranch)
+	if err != nil {
+		return fmt.Errorf("unable to get sha of head branch in %v: %w", pr, err)
+	}
 
 	// Determine the old merge-base before the rebase - we use this for LFS push later on
 	oldMergeBase, _, _ := git.NewCommand(ctx, "merge-base").AddDashesAndList(baseBranch, trackingBranch).RunStdString(&git.RunOpts{Dir: mergeCtx.tmpBasePath})
 	oldMergeBase = strings.TrimSpace(oldMergeBase)
 
 	// Rebase the tracking branch on to the base as the staging branch
-	if err := rebaseTrackingOnToBase(mergeCtx, repo_model.MergeStyleRebaseUpdate); err != nil {
+	if err := rebaseTrackingOnToBase(mergeCtx, repo_model.MergeStyleRebaseUpdate, upstream); err != nil {
 		return err
 	}
 
@@ -62,46 +90,51 @@ func updateHeadByRebaseOnToBase(ctx context.Context, pr *issues_model.PullReques
 		headUser = pr.HeadRepo.Owner
 	}
 
-	pushCmd := git.NewCommand(ctx, "push", "-f", "head_repo").
-		AddDynamicArguments(stagingBranch + ":" + git.BranchPrefix + pr.HeadBranch)
-
 	// Push back to the head repository.
 	// TODO: this cause an api call to "/api/internal/hook/post-receive/...",
 	//       that prevents us from doint the whole merge in one db transaction
-	mergeCtx.outbuf.Reset()
-	mergeCtx.errbuf.Reset()
+	return pushHeadWithLease(ctx, mergeCtx.tmpBasePath, "head_repo", git.BranchPrefix+pr.HeadBranch, leaseSHA,
+		repo_module.FullPushingEnvironment(headUser, doer, pr.HeadRepo, pr.HeadRepo.Name, pr.ID))
+}
 
-	if err := pushCmd.Run(&git.RunOpts{
-		Env: repo_module.FullPushingEnvironment(
-			headUser,
-			doer,
-			pr.HeadRepo,
-			pr.HeadRepo.Name,
-			pr.ID,
-		),
-		Dir:    mergeCtx.tmpBasePath,
-		Stdout: mergeCtx.outbuf,
-		Stderr: mergeCtx.errbuf,
-	}); err != nil {
-		if strings.Contains(mergeCtx.errbuf.String(), "non-fast-forward") {
-			return &git.ErrPushOutOfDate{
-				StdOut: mergeCtx.outbuf.String(),
-				StdErr: mergeCtx.errbuf.String(),
-				Err:    err,
-			}
-		} else if strings.Contains(mergeCtx.errbuf.String(), "! [remote rejected]") {
-			err := &git.ErrPushRejected{
-				StdOut: mergeCtx.outbuf.String(),
-				StdErr: mergeCtx.errbuf.String(),
-				Err:    err,
-			}
-			err.GenerateMessage()
-			return err
-		}
-		return fmt.Errorf("git push: %s", mergeCtx.errbuf.String())
+// pushHeadWithLease pushes the staging branch of the repository in dir to headRef of remote if headRef still points at leaseSHA.
+func pushHeadWithLease(ctx context.Context, dir, remote, headRef, leaseSHA string, env []string) error {
+	var outbuf, errbuf strings.Builder
+	err := git.NewCommand(ctx, "push", "--porcelain").
+		AddOptionFormat("--force-with-lease=%s:%s", headRef, leaseSHA).
+		AddDynamicArguments(remote, stagingBranch+":"+headRef).
+		Run(&git.RunOpts{Env: env, Dir: dir, Stdout: &outbuf, Stderr: &errbuf})
+	if err == nil {
+		return nil
 	}
-	mergeCtx.outbuf.Reset()
-	mergeCtx.errbuf.Reset()
 
-	return nil
+	// The porcelain status line of headRef, not hook output that may contain the same words.
+	status := ""
+	for line := range strings.Lines(outbuf.String()) {
+		if fields := strings.SplitN(strings.TrimRight(line, "\n"), "\t", 3); len(fields) == 3 && strings.HasSuffix(fields[1], ":"+headRef) {
+			status = fields[2]
+		}
+	}
+	switch {
+	// A lease that does not hold is stale info; receive-pack reports a ref moved, deleted or locked while the hooks ran, older git only in its error text.
+	case strings.HasSuffix(status, "(stale info)"), strings.HasSuffix(status, "(incorrect old value provided)"), strings.HasSuffix(status, "(reference does not exist)"),
+		(strings.HasSuffix(status, "(failed to update ref)") || strings.HasSuffix(status, "(reference already exists)")) && lostRefRace(errbuf.String(), headRef):
+		return &git.ErrPushOutOfDate{StdOut: outbuf.String(), StdErr: errbuf.String(), Err: err}
+	case strings.HasPrefix(status, "[remote rejected]"):
+		err := &git.ErrPushRejected{StdOut: outbuf.String(), StdErr: errbuf.String(), Err: err}
+		err.GenerateMessage()
+		return err
+	}
+	return fmt.Errorf("git push: %s: %w", errbuf.String(), err)
+}
+
+// lostRefRace reports whether receive-pack could not lock headRef because another writer moved or holds it.
+func lostRefRace(stderr, headRef string) bool {
+	for line := range strings.Lines(stderr) {
+		_, reason, ok := strings.Cut(line, "error: cannot lock ref '"+headRef+"': ")
+		if ok && (strings.Contains(reason, " but expected ") || strings.Contains(reason, ".lock': File exists")) {
+			return true
+		}
+	}
+	return false
 }

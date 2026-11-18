@@ -164,6 +164,19 @@ func GetUnmergedPullRequestsByBaseInfo(ctx context.Context, repoID int64, branch
 		Find(&prs)
 }
 
+// GetMergedSameRepoPullRequestsByHeadInfo returns the pull requests that merged headCommitID of the given branch of the repo into the same repo.
+func GetMergedSameRepoPullRequestsByHeadInfo(ctx context.Context, repoID int64, branch, headCommitID string) ([]*PullRequest, error) {
+	prs := make([]*PullRequest, 0, 2)
+	// Merges that did not record their head leave it empty.
+	if headCommitID == "" {
+		return prs, nil
+	}
+	return prs, db.GetEngine(ctx).
+		Where("head_repo_id=? AND base_repo_id=? AND head_branch=? AND has_merged=? AND flow=? AND merged_head_commit_id=?",
+			repoID, repoID, branch, true, PullRequestFlowGithub, headCommitID).
+		Find(&prs)
+}
+
 // GetPullRequestIDsByCheckStatus returns all pull requests according the special checking status.
 func GetPullRequestIDsByCheckStatus(ctx context.Context, status PullRequestStatus) ([]int64, error) {
 	prs := make([]int64, 0, 10)
