@@ -497,6 +497,25 @@ func TestPullRetargetChildOnDeleteOfMergedBranch(t *testing.T) {
 			assert.False(t, child.Issue.IsClosed)
 		})
 
+		t.Run("deleted branch without a branch row", func(t *testing.T) {
+			commitFile(t, repo, user, "main", "norow", "create", "x1.txt", "norow\n")
+			commitFile(t, repo, user, "norow", "on-norow", "create", "x2.txt", "child\n")
+			norowPR := createPullBetween(t, repo, user, "main", "norow")
+			childPR := createPullBetween(t, repo, user, "norow", "on-norow")
+			require.NoError(t, pull_service.Merge(t.Context(), norowPR, user, gitRepo, repo_model.MergeStyleMerge, "", "merge norow", false))
+			_, err := db.GetEngine(t.Context()).Where("repo_id = ? AND name = ?", repo.ID, "norow").Delete(new(git_model.Branch))
+			require.NoError(t, err)
+
+			require.NoError(t, repo_service.DeleteBranch(t.Context(), user, repo, gitRepo, "norow"))
+			require.NoError(t, queue.GetManager().FlushAll(t.Context(), 0))
+
+			_, retargeted := recorder.get(childPR.ID)
+			assert.False(t, retargeted)
+			child := loadPull(t, childPR.ID)
+			assert.Equal(t, "norow", child.BaseBranch)
+			assert.False(t, child.Issue.IsClosed)
+		})
+
 		t.Run("branch still heads an open pull request", func(t *testing.T) {
 			commitFile(t, repo, user, "main", "release", "create", "r.txt", "release\n")
 			commitFile(t, repo, user, "main", "shared", "create", "s.txt", "shared\n")

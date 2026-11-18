@@ -506,20 +506,16 @@ func HandleDeletedBranch(ctx context.Context, doer *user_model.User, repo *repo_
 	closeChildren := err == nil
 	if err != nil {
 		log.Error("check deleted branch %s in %-v: %v", branch, repo, err)
-	} else if dbBranch, err := git_model.GetBranch(ctx, repo.ID, branch); err != nil && !git_model.IsErrBranchNotExist(err) {
+	} else if dbBranch, err := git_model.GetBranch(ctx, repo.ID, branch); err != nil {
 		log.Error("get deleted branch %s in %-v: %v", branch, repo, err)
 		closeChildren = false
-	} else if err != nil || dbBranch.IsDeleted {
+	} else if dbBranch.IsDeleted {
 		// The latest deleted tip decides, so a late event acts as the latest one would; a row that does not contain the event's tip lags behind it and falls back to closing.
-		deletedTip := oldCommitID
-		if err == nil {
-			deletedTip = dbBranch.CommitID
-		}
-		if contained, err := containsCommit(ctx, gitRepo.Path, deletedTip, oldCommitID); err != nil {
-			log.Error("check deleted tip %s of %s in %-v: %v", deletedTip, branch, repo, err)
+		if contained, err := isAncestor(ctx, gitRepo.Path, oldCommitID, dbBranch.CommitID); err != nil {
+			log.Error("check deleted tip %s of %s in %-v: %v", dbBranch.CommitID, branch, repo, err)
 			closeChildren = false
 		} else if contained {
-			if err := retargetChildrenOfDeletedBranch(ctx, doer, gitRepo, repo.ID, branch, deletedTip); err != nil {
+			if err := retargetChildrenOfDeletedBranch(ctx, doer, gitRepo, repo.ID, branch, dbBranch.CommitID); err != nil {
 				log.Error("retarget children of deleted branch %s in %-v failed: %v", branch, repo, err)
 				closeChildren = false
 			}
@@ -537,12 +533,9 @@ func HandleDeletedBranch(ctx context.Context, doer *user_model.User, repo *repo_
 	}
 }
 
-// containsCommit reports whether commitID is tip or one of its ancestors in the repository at repoPath.
-func containsCommit(ctx context.Context, repoPath, tip, commitID string) (bool, error) {
-	if commitID == tip {
-		return true, nil
-	}
-	_, _, err := git.NewCommand(ctx, "merge-base", "--is-ancestor").AddDynamicArguments(commitID, tip).RunStdString(&git.RunOpts{Dir: repoPath})
+// isAncestor reports whether ancestor is descendant or one of its ancestors in the repository at repoPath.
+func isAncestor(ctx context.Context, repoPath, ancestor, descendant string) (bool, error) {
+	_, _, err := git.NewCommand(ctx, "merge-base", "--is-ancestor").AddDynamicArguments(ancestor, descendant).RunStdString(&git.RunOpts{Dir: repoPath})
 	if git.IsErrorExitCode(err, 1) {
 		return false, nil
 	}

@@ -132,7 +132,15 @@ func pushHeadWithLease(ctx context.Context, dir, remote, headRef, leaseSHA strin
 func lostRefRace(stderr, headRef string) bool {
 	for line := range strings.Lines(stderr) {
 		_, reason, ok := strings.Cut(line, "error: cannot lock ref '"+headRef+"': ")
-		if ok && (strings.Contains(reason, " but expected ") || strings.Contains(reason, ".lock': File exists")) {
+		if !ok {
+			continue
+		}
+		if strings.Contains(reason, " but expected ") {
+			return true
+		}
+		if strings.Contains(reason, ".lock': File exists") {
+			// A lock file left by a crashed git process looks the same and blocks every later update.
+			log.Warn("push to %s found the ref locked: %s", headRef, strings.TrimSpace(reason))
 			return true
 		}
 	}

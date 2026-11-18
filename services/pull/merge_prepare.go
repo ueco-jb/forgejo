@@ -249,31 +249,28 @@ func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle,
 	ctx.outbuf.Reset()
 	ctx.errbuf.Reset()
 
-	isAncestor := func(ancestor, descendant string) (bool, error) {
-		err := git.NewCommand(ctx, "merge-base", "--is-ancestor").AddDynamicArguments(ancestor, descendant).Run(ctx.RunOpts())
-		if git.IsErrorExitCode(err, 1) {
-			return false, nil
-		}
+	contains := func(ancestor, descendant string) (bool, error) {
+		ok, err := isAncestor(ctx, ctx.tmpBasePath, ancestor, descendant)
 		if err != nil {
-			return false, fmt.Errorf("git merge-base --is-ancestor %s %s in temp repo for %v: %w\n%s", ancestor, descendant, ctx.pr, err, ctx.errbuf.String())
+			return false, fmt.Errorf("unable to check that %s is an ancestor of %s in temp repo for %v: %w", ancestor, descendant, ctx.pr, err)
 		}
-		return true, nil
+		return ok, nil
 	}
 	if upstream == "" {
 		upstream = baseBranch
-	} else if ok, err := isAncestor(upstream, stagingBranch); err != nil {
+	} else if ok, err := contains(upstream, stagingBranch); err != nil {
 		return err
 	} else if !ok {
 		return fmt.Errorf("upstream %s is not an ancestor of the head of %v", upstream, ctx.pr)
 	}
 	// If base is already contained in staging and nothing below base would be dropped, no rebasing needs to be done.
-	baseInHead, err := isAncestor(baseBranch, stagingBranch)
+	baseInHead, err := contains(baseBranch, stagingBranch)
 	if err != nil {
 		return err
 	}
 	upstreamInBase := upstream == baseBranch
 	if !upstreamInBase {
-		if upstreamInBase, err = isAncestor(upstream, baseBranch); err != nil {
+		if upstreamInBase, err = contains(upstream, baseBranch); err != nil {
 			return err
 		}
 	}
@@ -282,7 +279,7 @@ func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle,
 	}
 
 	// git replay leaves staging untouched for an empty range.
-	stagingInUpstream, err := isAncestor(stagingBranch, upstream)
+	stagingInUpstream, err := contains(stagingBranch, upstream)
 	if err != nil {
 		return err
 	}
