@@ -180,7 +180,8 @@ type PullRequest struct {
 
 	HasMerged      bool   `xorm:"INDEX"`
 	MergedCommitID string `xorm:"VARCHAR(64)"`
-	// MergedHeadCommitID is the head commit a merge through Forgejo merged; empty for other merges.
+	// MergedHeadCommitID is the head commit a merge through Forgejo pushed, and only counts when HasMerged is set.
+	// It is empty for other merges.
 	MergedHeadCommitID string             `xorm:"VARCHAR(64)"`
 	MergerID           int64              `xorm:"INDEX"`
 	Merger             *user_model.User   `xorm:"-"`

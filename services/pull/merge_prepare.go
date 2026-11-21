@@ -233,7 +233,8 @@ func getDiffTree(ctx context.Context, repoPath, baseBranch, headBranch string, o
 	return err
 }
 
-// rebaseTrackingOnToBase points staging at the tracking branch rebased on to the base branch, replaying only the commits after upstream (the base branch when empty); HEAD is left unspecified.
+// rebaseTrackingOnToBase points staging at the tracking branch rebased on to the base branch, replaying only the commits after upstream (the base branch when empty).
+// HEAD is left unspecified.
 // If there is a conflict it will return a models.ErrRebaseConflicts.
 func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle, upstream string) error {
 	// Create staging branch
@@ -261,7 +262,7 @@ func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle,
 	} else if ok, err := contains(upstream, stagingBranch); err != nil {
 		return err
 	} else if !ok {
-		return fmt.Errorf("upstream %s is not an ancestor of the head of %v", upstream, ctx.pr)
+		return models.ErrUpstreamNotAncestor{Upstream: upstream}
 	}
 	// If base is already contained in staging and nothing below base would be dropped, no rebasing needs to be done.
 	baseInHead, err := contains(baseBranch, stagingBranch)

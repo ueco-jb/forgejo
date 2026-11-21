@@ -313,12 +313,20 @@ func TestGetUnmergedPullRequestsByBaseInfo(t *testing.T) {
 func TestGetMergedSameRepoPullRequestsByHeadInfo(t *testing.T) {
 	require.NoError(t, unittest.PrepareTestDatabase())
 	const head = "1111111111111111111111111111111111111111"
-	match := &issues_model.PullRequest{IssueID: 2, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head}
-	require.NoError(t, db.Insert(db.DefaultContext, match))
+	index := int64(900)
+	insert := func(pr *issues_model.PullRequest) {
+		index++
+		issue := &issues_model.Issue{RepoID: pr.BaseRepoID, Index: index, PosterID: 1, Title: "merged", IsPull: true, IsClosed: true}
+		require.NoError(t, db.Insert(db.DefaultContext, issue))
+		pr.IssueID = issue.ID
+		require.NoError(t, db.Insert(db.DefaultContext, pr))
+	}
+	match := &issues_model.PullRequest{HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head}
+	insert(match)
 	// A fork pull request, an AGit one and one that merged another head of the same branch.
-	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 3, HeadRepoID: 1, BaseRepoID: 2, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head}))
-	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 4, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head, Flow: issues_model.PullRequestFlowAGit}))
-	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 5, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: "2222222222222222222222222222222222222222"}))
+	insert(&issues_model.PullRequest{HeadRepoID: 1, BaseRepoID: 2, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head})
+	insert(&issues_model.PullRequest{HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head, Flow: issues_model.PullRequestFlowAGit})
+	insert(&issues_model.PullRequest{HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: "2222222222222222222222222222222222222222"})
 
 	prs, err := issues_model.GetMergedSameRepoPullRequestsByHeadInfo(db.DefaultContext, 1, "branch1", head)
 	require.NoError(t, err)

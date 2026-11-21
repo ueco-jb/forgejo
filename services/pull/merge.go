@@ -313,7 +313,8 @@ func handleCloseCrossReferences(ctx context.Context, pr *issues_model.PullReques
 	return nil
 }
 
-// doMergeAndPush performs the merge operation and pushes it up to the base repository; for a merge into the base it first records the merged head of pr
+// doMergeAndPush performs the merge operation and pushes it up to the base repository.
+// For a merge into the base it first records the merged head of pr.
 func doMergeAndPush(ctx context.Context, pr *issues_model.PullRequest, doer *user_model.User, mergeStyle repo_model.MergeStyle, expectedHeadCommitID, message string, pushTrigger repo_module.PushTrigger) (string, error) { //nolint:unparam
 	// Clone base repo.
 	mergeCtx, cancel, err := createTemporaryRepoForMerge(ctx, pr, doer, expectedHeadCommitID)

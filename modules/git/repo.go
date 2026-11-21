@@ -216,9 +216,12 @@ func CloneWithArgs(ctx context.Context, args TrustedCmdArgs, from, to string, op
 
 // PushOptions options when push to remote
 type PushOptions struct {
-	Remote               string
-	Branch               string
-	Force                bool
+	Remote string
+	Branch string
+	Force  bool
+	// ForceWithLease is "<ref>:<expected commit>".
+	// The push of ref then fails with ErrPushOutOfDate if ref moved.
+	ForceWithLease       string
 	Mirror               bool
 	Env                  []string
 	Timeout              time.Duration
@@ -259,6 +262,9 @@ func Push(ctx context.Context, repoPath string, opts PushOptions) error {
 	if opts.Force {
 		cmd.AddArguments("-f")
 	}
+	if opts.ForceWithLease != "" {
+		cmd.AddArguments("--porcelain").AddOptionFormat("--force-with-lease=%s", opts.ForceWithLease)
+	}
 	if opts.Mirror {
 		cmd.AddArguments("--mirror")
 	}
@@ -272,6 +278,17 @@ func Push(ctx context.Context, repoPath string, opts PushOptions) error {
 		cmd.SetDescription(fmt.Sprintf("push branch %s to %s (force: %t, mirror: %t)", opts.Branch, util.SanitizeCredentialURLs(opts.Remote), opts.Force, opts.Mirror))
 	} else {
 		cmd.SetDescription(fmt.Sprintf("push branch %s to %s (force: %t, mirror: %t)", opts.Branch, opts.Remote, opts.Force, opts.Mirror))
+	}
+
+	if opts.ForceWithLease != "" {
+		// RunStdString drops stdout on failure, and the porcelain status is on stdout.
+		var stdout, stderr strings.Builder
+		err := cmd.Run(&RunOpts{Env: opts.Env, Timeout: opts.Timeout, Dir: repoPath, Stdout: &stdout, Stderr: &stderr})
+		if err != nil {
+			ref, _, _ := strings.Cut(opts.ForceWithLease, ":")
+			return leasedPushError(stdout.String(), stderr.String(), ref, err)
+		}
+		return nil
 	}
 
 	stdout, stderr, err := cmd.RunStdString(&RunOpts{Env: opts.Env, Timeout: opts.Timeout, Dir: repoPath})
@@ -289,6 +306,38 @@ func Push(ctx context.Context, repoPath string, opts PushOptions) error {
 	}
 
 	return nil
+}
+
+// leasedPushError classifies a failed porcelain push by the status line of ref, not by hook output that may contain the same words.
+func leasedPushError(stdout, stderr, ref string, err error) error {
+	status := ""
+	for line := range strings.Lines(stdout) {
+		if fields := strings.SplitN(strings.TrimRight(line, "\n"), "\t", 3); len(fields) == 3 && strings.HasSuffix(fields[1], ":"+ref) {
+			status = fields[2]
+		}
+	}
+	switch {
+	// A lease that does not hold is stale info.
+	// receive-pack reports a ref moved or deleted while the hooks ran, older git only in its error text.
+	case strings.HasSuffix(status, "(stale info)"), strings.HasSuffix(status, "(incorrect old value provided)"), strings.HasSuffix(status, "(reference does not exist)"),
+		(strings.HasSuffix(status, "(failed to update ref)") || strings.HasSuffix(status, "(reference already exists)")) && refMovedDuringPush(stderr, ref):
+		return &ErrPushOutOfDate{StdOut: stdout, StdErr: stderr, Err: err}
+	case strings.HasPrefix(status, "[remote rejected]"):
+		err := &ErrPushRejected{StdOut: stdout, StdErr: stderr, Err: err}
+		err.GenerateMessage()
+		return err
+	}
+	return fmt.Errorf("push failed: %w - %s\n%s", err, stderr, stdout)
+}
+
+// refMovedDuringPush reports whether receive-pack could not lock ref because another writer moved it.
+func refMovedDuringPush(stderr, ref string) bool {
+	for line := range strings.Lines(stderr) {
+		if _, reason, ok := strings.Cut(line, "error: cannot lock ref '"+ref+"': "); ok && strings.Contains(reason, " but expected ") {
+			return true
+		}
+	}
+	return false
 }
 
 // DivergeObject represents commit count diverging commits

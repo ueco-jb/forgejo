@@ -7,13 +7,12 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"forgejo.org/models"
 	auth_model "forgejo.org/models/auth"
 	"forgejo.org/models/db"
 	git_model "forgejo.org/models/git"
@@ -129,7 +128,8 @@ func testRebaseOntoAfterSquashedParent(t *testing.T) {
 	t.Run("upstream that is not an ancestor of the head is refused", func(t *testing.T) {
 		mainHead, err := gitRepo.GetBranchCommitID("main")
 		require.NoError(t, err)
-		require.Error(t, pull_service.RebaseOnto(t.Context(), loadPull(t, childPR.ID), user, mainHead, childHead))
+		err = pull_service.RebaseOnto(t.Context(), loadPull(t, childPR.ID), user, mainHead, childHead)
+		require.True(t, models.IsErrUpstreamNotAncestor(err), "got %v", err)
 		head, err := gitRepo.GetBranchCommitID("child")
 		require.NoError(t, err)
 		assert.Equal(t, childHead, head)
@@ -181,7 +181,7 @@ func testRebaseOntoAfterSquashedParent(t *testing.T) {
 	})
 }
 
-// A push that moves the head while the server pushes the rebased head makes the update API answer 409.
+// A push that moves the head after the server fetched it for a rebase makes the update API answer 409 and keeps that push.
 func TestAPIPullUpdateByRebaseLostLease(t *testing.T) {
 	onApplicationRun(t, func(t *testing.T, _ *url.URL) {
 		user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
@@ -195,9 +195,9 @@ func TestAPIPullUpdateByRebaseLostLease(t *testing.T) {
 		commitFile(t, repo, user, "main", "main", "create", "m.txt", "main\n")
 		pr := createPullBetween(t, repo, user, "main", "feature")
 
-		hooks := filepath.Join(repo.RepoPath(), "hooks", "pre-receive.d")
-		require.NoError(t, os.MkdirAll(hooks, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(hooks, "move-feature"), []byte("#!/bin/sh\nunset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/feature "+concurrent+"\n"), 0o755))
+		defer test.MockVariableValue(&pull_service.TestSeamBeforeHeadPush, func(*issues_model.PullRequest) {
+			require.NoError(t, gitRepo.SetReference(git.BranchPrefix+"feature", concurrent))
+		})()
 
 		token := getTokenForLoggedInUser(t, loginUser(t, user.Name), auth_model.AccessTokenScopeWriteRepository)
 		req := NewRequestf(t, "POST", "/api/v1/repos/%s/%s/pulls/%d/update?style=rebase", user.Name, repo.Name, pr.Index).AddTokenAuth(token)

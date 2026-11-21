@@ -211,7 +211,8 @@ func (repo *Repository) IsBranchExist(name string) bool {
 	return repo.IsReferenceExist(BranchPrefix + name)
 }
 
-// HasBranch reports whether the branch exists; unlike the IsBranchExist method it reads the ref fresh and returns a failed read as an error.
+// HasBranch reports whether the branch exists.
+// Unlike the IsBranchExist method it reads the ref fresh and returns a failed read as an error.
 func (repo *Repository) HasBranch(name string) (bool, error) {
 	return hasBranch(repo.Ctx, repo.Path, name)
 }

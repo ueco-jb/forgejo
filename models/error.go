@@ -377,6 +377,21 @@ func (err ErrSHADoesNotMatch) Error() string {
 	return fmt.Sprintf("sha does not match [given: %s, expected: %s]", err.GivenSHA, err.CurrentSHA)
 }
 
+// ErrUpstreamNotAncestor is returned when a rebase onto a new base would drop commits because upstream is not in the head.
+type ErrUpstreamNotAncestor struct {
+	Upstream string
+}
+
+// IsErrUpstreamNotAncestor checks if an error is a ErrUpstreamNotAncestor.
+func IsErrUpstreamNotAncestor(err error) bool {
+	_, ok := err.(ErrUpstreamNotAncestor)
+	return ok
+}
+
+func (err ErrUpstreamNotAncestor) Error() string {
+	return fmt.Sprintf("upstream %s is not an ancestor of the head", err.Upstream)
+}
+
 // ErrSHANotFound represents a "SHADoesNotMatch" kind of error.
 type ErrSHANotFound struct {
 	SHA string

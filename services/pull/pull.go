@@ -502,7 +502,8 @@ func HandleDeletedBranch(ctx context.Context, doer *user_model.User, repo *repo_
 	if exists {
 		return
 	}
-	// Children are closed only when their retarget was decided and did not fail; otherwise they stay open.
+	// Children are closed only when their retarget was decided and did not fail.
+	// Otherwise they stay open.
 	closeChildren := err == nil
 	if err != nil {
 		log.Error("check deleted branch %s in %-v: %v", branch, repo, err)
@@ -510,7 +511,8 @@ func HandleDeletedBranch(ctx context.Context, doer *user_model.User, repo *repo_
 		log.Error("get deleted branch %s in %-v: %v", branch, repo, err)
 		closeChildren = false
 	} else if dbBranch.IsDeleted {
-		// The latest deleted tip decides, so a late event acts as the latest one would; a row that does not contain the event's tip lags behind it and falls back to closing.
+		// The latest deleted tip decides, so a late event acts as the latest one would.
+		// A row that does not contain the event's tip lags behind it and falls back to closing.
 		if contained, err := isAncestor(ctx, gitRepo.Path, oldCommitID, dbBranch.CommitID); err != nil {
 			log.Error("check deleted tip %s of %s in %-v: %v", dbBranch.CommitID, branch, repo, err)
 			closeChildren = false
