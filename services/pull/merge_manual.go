@@ -71,6 +71,7 @@ func MergedManually(ctx context.Context, pr *issues_model.PullRequest, doer *use
 		pr.Status = issues_model.PullRequestStatusManuallyMerged
 		pr.Merger = doer
 		pr.MergerID = doer.ID
+		pr.MergedHeadCommitID = ""
 
 		var merged bool
 		if merged, err = pr.SetMerged(ctx); err != nil {
@@ -135,6 +136,7 @@ func manuallyMerged(ctx context.Context, pr *issues_model.PullRequest) bool {
 	}
 	pr.Merger = merger
 	pr.MergerID = merger.ID
+	pr.MergedHeadCommitID = ""
 
 	if merged, err := pr.SetMerged(ctx); err != nil {
 		log.Error("%-v setMerged : %v", pr, err)

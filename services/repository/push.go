@@ -266,10 +266,7 @@ func pushUpdates(optsList []*repo_module.PushUpdateOptions) error {
 				}
 			} else {
 				notify_service.DeleteRef(ctx, pusher, repo, opts.RefFullName)
-				if err = pull_service.CloseBranchPulls(ctx, pusher, repo.ID, branch); err != nil {
-					// close all related pulls
-					log.Error("close related pull request failed: %v", err)
-				}
+				pull_service.HandleDeletedBranch(ctx, pusher, repo, gitRepo, branch, opts.OldCommitID)
 			}
 
 			// Even if user delete a branch on a repository which he didn't watch, he will be watch that.

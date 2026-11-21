@@ -210,3 +210,22 @@ func TestIsBranchExist(t *testing.T) {
 	assert.False(t, IsBranchExist(t.Context(), repo1Path, "signed-tag"))
 	assert.False(t, IsBranchExist(t.Context(), repo1Path, "test"))
 }
+
+func TestHasBranch(t *testing.T) {
+	repo, err := openRepositoryWithDefaultContext(filepath.Join(testReposDir, "repo1_bare"))
+	require.NoError(t, err)
+	defer repo.Close()
+
+	exists, err := repo.HasBranch("branch1")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	for _, name := range []string{"test", "signed-tag", "153f451b9ee7fa1da317ab17a127e9fd9d384310"} {
+		exists, err = repo.HasBranch(name)
+		require.NoError(t, err)
+		assert.False(t, exists, name)
+	}
+
+	_, err = (&Repository{Ctx: t.Context(), Path: t.TempDir()}).HasBranch("branch1")
+	require.Error(t, err)
+}

@@ -233,9 +233,9 @@ func getDiffTree(ctx context.Context, repoPath, baseBranch, headBranch string, o
 	return err
 }
 
-// rebaseTrackingOnToBase checks out the tracking branch as staging and rebases it on to the base branch
-// if there is a conflict it will return a models.ErrRebaseConflicts
-func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle) error {
+// rebaseTrackingOnToBase points staging at the tracking branch rebased on to the base branch, replaying only the commits after upstream (the base branch when empty); HEAD is left unspecified.
+// If there is a conflict it will return a models.ErrRebaseConflicts.
+func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle, upstream string) error {
 	// Create staging branch
 	if err := git.NewCommand(ctx, "branch").AddDynamicArguments(stagingBranch, trackingBranch).
 		Run(ctx.RunOpts()); err != nil {
@@ -249,8 +249,45 @@ func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle)
 	ctx.outbuf.Reset()
 	ctx.errbuf.Reset()
 
-	// If the pull request is zero commits behind, then no rebasing needs to be done.
-	if ctx.pr.CommitsBehind == 0 {
+	contains := func(ancestor, descendant string) (bool, error) {
+		ok, err := isAncestor(ctx, ctx.tmpBasePath, ancestor, descendant)
+		if err != nil {
+			return false, fmt.Errorf("unable to check that %s is an ancestor of %s in temp repo for %v: %w", ancestor, descendant, ctx.pr, err)
+		}
+		return ok, nil
+	}
+	if upstream == "" {
+		upstream = baseBranch
+	} else if ok, err := contains(upstream, stagingBranch); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("upstream %s is not an ancestor of the head of %v", upstream, ctx.pr)
+	}
+	// If base is already contained in staging and nothing below base would be dropped, no rebasing needs to be done.
+	baseInHead, err := contains(baseBranch, stagingBranch)
+	if err != nil {
+		return err
+	}
+	upstreamInBase := upstream == baseBranch
+	if !upstreamInBase {
+		if upstreamInBase, err = contains(upstream, baseBranch); err != nil {
+			return err
+		}
+	}
+	if baseInHead && upstreamInBase {
+		return nil
+	}
+
+	// git replay leaves staging untouched for an empty range.
+	stagingInUpstream, err := contains(stagingBranch, upstream)
+	if err != nil {
+		return err
+	}
+	if stagingInUpstream {
+		if err := git.NewCommand(ctx, "update-ref").AddDynamicArguments(git.BranchPrefix+stagingBranch, baseBranch).
+			Run(ctx.RunOpts()); err != nil {
+			return fmt.Errorf("unable to reset staging to base in temp repo for %v: %w\n%s", ctx.pr, err, ctx.errbuf.String())
+		}
 		return nil
 	}
 
@@ -265,7 +302,7 @@ func rebaseTrackingOnToBase(ctx *mergeContext, mergeStyle repo_model.MergeStyle)
 		// Use git-replay for performance and to preserve unknown headers,
 		// like the "change-id" header used by Jujutsu and GitButler.
 		if err := git.NewCommand(ctx, "replay", "--onto").AddDynamicArguments(baseBranch).
-			AddDynamicArguments(fmt.Sprintf("%s..%s", baseBranch, stagingBranch)).
+			AddDynamicArguments(upstream + ".." + stagingBranch).
 			Run(ctx.RunOpts()); err != nil {
 			// git-replay doesn't tell us which commit first created a merge conflict.
 			// In order to preserve the quality of our error messages, fall back to
@@ -315,7 +352,7 @@ regular_rebase:
 	ctx.errbuf.Reset()
 
 	// Rebase before merging
-	if err := git.NewCommand(ctx, "rebase").AddDynamicArguments(baseBranch).
+	if err := git.NewCommand(ctx, "rebase", "--onto").AddDynamicArguments(baseBranch, upstream).
 		Run(ctx.RunOpts()); err != nil {
 		// Rebase will leave a REBASE_HEAD file in .git if there is a conflict
 		if _, statErr := os.Stat(filepath.Join(ctx.tmpBasePath, ".git", "REBASE_HEAD")); statErr == nil {

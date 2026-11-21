@@ -310,6 +310,27 @@ func TestGetUnmergedPullRequestsByBaseInfo(t *testing.T) {
 	assert.Equal(t, "master", pr.BaseBranch)
 }
 
+func TestGetMergedSameRepoPullRequestsByHeadInfo(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	const head = "1111111111111111111111111111111111111111"
+	match := &issues_model.PullRequest{IssueID: 2, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head}
+	require.NoError(t, db.Insert(db.DefaultContext, match))
+	// A fork pull request, an AGit one and one that merged another head of the same branch.
+	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 3, HeadRepoID: 1, BaseRepoID: 2, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head}))
+	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 4, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: head, Flow: issues_model.PullRequestFlowAGit}))
+	require.NoError(t, db.Insert(db.DefaultContext, &issues_model.PullRequest{IssueID: 5, HeadRepoID: 1, BaseRepoID: 1, HeadBranch: "branch1", BaseBranch: "master", HasMerged: true, MergedHeadCommitID: "2222222222222222222222222222222222222222"}))
+
+	prs, err := issues_model.GetMergedSameRepoPullRequestsByHeadInfo(db.DefaultContext, 1, "branch1", head)
+	require.NoError(t, err)
+	require.Len(t, prs, 1)
+	assert.Equal(t, match.ID, prs[0].ID)
+
+	// The fixture pull request 1 merged branch1 without recording its head.
+	prs, err = issues_model.GetMergedSameRepoPullRequestsByHeadInfo(db.DefaultContext, 1, "branch1", "")
+	require.NoError(t, err)
+	assert.Empty(t, prs)
+}
+
 func TestGetPullRequestByIndex(t *testing.T) {
 	require.NoError(t, unittest.PrepareTestDatabase())
 	pr, err := issues_model.GetPullRequestByIndex(db.DefaultContext, 1, 2)

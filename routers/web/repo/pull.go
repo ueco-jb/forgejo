@@ -55,7 +55,6 @@ import (
 	"forgejo.org/services/context/upload"
 	"forgejo.org/services/forms"
 	"forgejo.org/services/gitdiff"
-	notify_service "forgejo.org/services/notify"
 	pull_service "forgejo.org/services/pull"
 	repo_service "forgejo.org/services/repository"
 
@@ -1356,6 +1355,10 @@ func UpdatePullRequest(ctx *context.Context) {
 			ctx.Flash.Error(flashError)
 			ctx.Redirect(issue.Link())
 			return
+		} else if git.IsErrPushOutOfDate(err) {
+			ctx.Flash.Error(ctx.Tr("repo.pulls.update_out_of_date"))
+			ctx.Redirect(issue.Link())
+			return
 		}
 		ctx.Flash.Error(err.Error())
 		ctx.Redirect(issue.Link())
@@ -1975,7 +1978,6 @@ func UpdatePullRequestTarget(ctx *context.Context) {
 		}
 		return
 	}
-	notify_service.PullRequestChangeTargetBranch(ctx, ctx.Doer, pr, targetBranch)
 
 	ctx.JSON(http.StatusOK, map[string]any{
 		"base_branch": pr.BaseBranch,

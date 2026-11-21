@@ -41,7 +41,6 @@ import (
 	"forgejo.org/services/forms"
 	"forgejo.org/services/gitdiff"
 	issue_service "forgejo.org/services/issue"
-	notify_service "forgejo.org/services/notify"
 	pull_service "forgejo.org/services/pull"
 	repo_service "forgejo.org/services/repository"
 )
@@ -785,7 +784,6 @@ func EditPullRequest(ctx *context.APIContext) {
 			ctx.InternalServerError(err)
 			return
 		}
-		notify_service.PullRequestChangeTargetBranch(ctx, ctx.Doer(), pr, form.Base)
 	}
 
 	// update allow edits
@@ -1359,6 +1357,9 @@ func UpdatePullRequest(ctx *context.APIContext) {
 			return
 		} else if models.IsErrRebaseConflicts(err) {
 			ctx.Error(http.StatusConflict, "Update", "rebase failed because of conflict")
+			return
+		} else if git.IsErrPushOutOfDate(err) {
+			ctx.Error(http.StatusConflict, "Update", "head branch was updated during the update, try again")
 			return
 		} else if errors.Is(err, pull_service.ErrPullRequestIsUpdateToDate) {
 			// No need to report an error -- the update operation didn't do anything, but there was nothing to be done.

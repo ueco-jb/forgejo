@@ -313,7 +313,7 @@ func handleCloseCrossReferences(ctx context.Context, pr *issues_model.PullReques
 	return nil
 }
 
-// doMergeAndPush performs the merge operation without changing any pull information in database and pushes it up to the base repository
+// doMergeAndPush performs the merge operation and pushes it up to the base repository; for a merge into the base it first records the merged head of pr
 func doMergeAndPush(ctx context.Context, pr *issues_model.PullRequest, doer *user_model.User, mergeStyle repo_model.MergeStyle, expectedHeadCommitID, message string, pushTrigger repo_module.PushTrigger) (string, error) { //nolint:unparam
 	// Clone base repo.
 	mergeCtx, cancel, err := createTemporaryRepoForMerge(ctx, pr, doer, expectedHeadCommitID)
@@ -387,6 +387,16 @@ func doMergeAndPush(ctx context.Context, pr *issues_model.PullRequest, doer *use
 		pr.BaseRepo.Name,
 		pr.ID,
 	)
+
+	// The base push marks the pull request merged, so its head is recorded first.
+	if pushTrigger == repo_module.PushTriggerPRMergeToBase {
+		if pr.MergedHeadCommitID, err = git.GetFullCommitID(ctx, mergeCtx.tmpBasePath, trackingBranch); err != nil {
+			return "", fmt.Errorf("unable to get the merged head of %v: %w", pr, err)
+		}
+		if err := pr.UpdateColsIfNotMerged(ctx, "merged_head_commit_id"); err != nil {
+			return "", fmt.Errorf("unable to record the merged head of %v: %w", pr, err)
+		}
+	}
 
 	mergeCtx.env = append(mergeCtx.env, repo_module.EnvPushTrigger+"="+string(pushTrigger))
 	pushCmd := git.NewCommand(ctx, "push", "origin").AddDynamicArguments(baseBranch + ":" + git.BranchPrefix + pr.BaseBranch)
