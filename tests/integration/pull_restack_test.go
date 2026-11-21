@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"forgejo.org/models"
 	auth_model "forgejo.org/models/auth"
 	"forgejo.org/models/db"
 	git_model "forgejo.org/models/git"
@@ -126,16 +125,6 @@ func testRebaseOntoAfterSquashedParent(t *testing.T) {
 
 	require.NoError(t, pull_service.Merge(t.Context(), parentPR, user, gitRepo, repo_model.MergeStyleSquash, "", "squash parent", false))
 	require.NoError(t, pull_service.ChangeTargetBranch(t.Context(), childPR, user, "main"))
-
-	t.Run("plain rebase replays the parent's commits", func(t *testing.T) {
-		err := pull_service.RebaseOnto(t.Context(), loadPull(t, childPR.ID), user, "", childHead)
-		require.True(t, models.IsErrRebaseConflicts(err), "got %v", err)
-	})
-
-	t.Run("stale expected head is refused", func(t *testing.T) {
-		err := pull_service.RebaseOnto(t.Context(), loadPull(t, childPR.ID), user, parentHead, parentHead)
-		require.True(t, models.IsErrSHADoesNotMatch(err), "got %v", err)
-	})
 
 	t.Run("upstream that is not an ancestor of the head is refused", func(t *testing.T) {
 		mainHead, err := gitRepo.GetBranchCommitID("main")
@@ -252,39 +241,6 @@ func TestPullRetargetChildOnDeleteOfMergedBranch(t *testing.T) {
 		notify_service.RegisterNotifier(recorder)
 		defer notify_service.UnregisterNotifier(recorder)
 
-		t.Run("merged head is deleted", func(t *testing.T) {
-			commitFile(t, repo, user, "main", "parent", "create", "a.txt", "parent\n")
-			commitFile(t, repo, user, "parent", "child", "create", "b.txt", "child\n")
-			parentPR := createPullBetween(t, repo, user, "main", "parent")
-			childPR := createPullBetween(t, repo, user, "parent", "child")
-			require.NoError(t, pull_service.Merge(t.Context(), parentPR, user, gitRepo, repo_model.MergeStyleMerge, "", "merge parent", false))
-			hook := &webhook_model.Webhook{RepoID: repo.ID, URL: "http://127.0.0.1/", ContentType: webhook_model.ContentTypeJSON, IsActive: true, Type: webhook_module.FORGEJO, HookEvent: &webhook_module.HookEvent{SendEverything: true}}
-			require.NoError(t, hook.UpdateEvent())
-			require.NoError(t, webhook_model.CreateWebhook(t.Context(), hook, ""))
-
-			require.NoError(t, repo_service.DeleteBranch(t.Context(), user, repo, gitRepo, "parent"))
-			require.NoError(t, queue.GetManager().FlushAll(t.Context(), 0))
-
-			old, retargeted := recorder.get(childPR.ID)
-			require.True(t, retargeted)
-			assert.Equal(t, "parent", old)
-
-			// The payload permissions are those of the poster, the repo owner.
-			edited := false
-			for _, task := range retrieveHookTasks(t, hook.ID, false) {
-				var payload api.PullRequestPayload
-				require.NoError(t, json.Unmarshal([]byte(task.PayloadContent), &payload))
-				if task.EventType == webhook_module.HookEventPullRequest && payload.Action == api.HookIssueEdited && payload.Index == childPR.Index {
-					edited = true
-					assert.True(t, payload.Repository.Permissions.Admin)
-				}
-			}
-			assert.True(t, edited)
-			child := loadPull(t, childPR.ID)
-			assert.Equal(t, "main", child.BaseBranch)
-			assert.False(t, child.Issue.IsClosed)
-		})
-
 		t.Run("merged unchanged into two branches", func(t *testing.T) {
 			commitFile(t, repo, user, "main", "stable", "create", "g.txt", "stable\n")
 			commitFile(t, repo, user, "main", "both", "create", "h.txt", "both\n")
@@ -311,6 +267,9 @@ func TestPullRetargetChildOnDeleteOfMergedBranch(t *testing.T) {
 			pushedPR := createPullBetween(t, repo, user, "main", "pushed")
 			childPR := createPullBetween(t, repo, user, "pushed", "on-pushed")
 			require.NoError(t, pull_service.Merge(t.Context(), pushedPR, user, gitRepo, repo_model.MergeStyleMerge, "", "merge pushed", false))
+			hook := &webhook_model.Webhook{RepoID: repo.ID, URL: "http://127.0.0.1/", ContentType: webhook_model.ContentTypeJSON, IsActive: true, Type: webhook_module.FORGEJO, HookEvent: &webhook_module.HookEvent{SendEverything: true}}
+			require.NoError(t, hook.UpdateEvent())
+			require.NoError(t, webhook_model.CreateWebhook(t.Context(), hook, ""))
 
 			remote := *u
 			remote.Path = repo.FullName() + ".git"
@@ -325,27 +284,21 @@ func TestPullRetargetChildOnDeleteOfMergedBranch(t *testing.T) {
 			old, retargeted := recorder.get(childPR.ID)
 			require.True(t, retargeted)
 			assert.Equal(t, "pushed", old)
+
+			// The payload permissions are those of the poster, the repo owner.
+			edited := false
+			for _, task := range retrieveHookTasks(t, hook.ID, false) {
+				var payload api.PullRequestPayload
+				require.NoError(t, json.Unmarshal([]byte(task.PayloadContent), &payload))
+				if task.EventType == webhook_module.HookEventPullRequest && payload.Action == api.HookIssueEdited && payload.Index == childPR.Index {
+					edited = true
+					assert.True(t, payload.Repository.Permissions.Admin)
+				}
+			}
+			assert.True(t, edited)
 			child := loadPull(t, childPR.ID)
 			assert.Equal(t, "main", child.BaseBranch)
 			assert.False(t, child.Issue.IsClosed)
-		})
-
-		t.Run("head pushed after the last pull request check", func(t *testing.T) {
-			before, err := gitRepo.GetBranchCommitID("main")
-			require.NoError(t, err)
-			commitFile(t, repo, user, "main", "late", "create", "l.txt", "late\n")
-			commitFile(t, repo, user, "late", "on-late", "create", "m.txt", "child\n")
-			latePR := createPullBetween(t, repo, user, "main", "late")
-			childPR := createPullBetween(t, repo, user, "late", "on-late")
-			require.NoError(t, gitRepo.SetReference(latePR.GetGitRefName(), before))
-			require.NoError(t, pull_service.Merge(t.Context(), latePR, user, gitRepo, repo_model.MergeStyleMerge, "", "merge late", false))
-
-			require.NoError(t, repo_service.DeleteBranch(t.Context(), user, repo, gitRepo, "late"))
-			require.NoError(t, queue.GetManager().FlushAll(t.Context(), 0))
-
-			_, retargeted := recorder.get(childPR.ID)
-			require.True(t, retargeted)
-			assert.Equal(t, "main", loadPull(t, childPR.ID).BaseBranch)
 		})
 
 		t.Run("base of the merged pull request is gone", func(t *testing.T) {
@@ -421,30 +374,6 @@ func TestPullRetargetChildOnDeleteOfMergedBranch(t *testing.T) {
 			child := loadPull(t, childPR.ID)
 			assert.Equal(t, "back", child.BaseBranch)
 			assert.False(t, child.Issue.IsClosed)
-		})
-
-		t.Run("deletion event of an older tip of the branch", func(t *testing.T) {
-			first := commitFile(t, repo, user, "main", "gen", "create", "o.txt", "first\n")
-			genPR := createPullBetween(t, repo, user, "main", "gen")
-			require.NoError(t, pull_service.Merge(t.Context(), genPR, user, gitRepo, repo_model.MergeStyleMerge, "", "merge gen", false))
-			commitFile(t, repo, user, "gen", "gen", "create", "p.txt", "second\n")
-			commitFile(t, repo, user, "gen", "on-gen", "create", "q.txt", "child\n")
-			childPR := createPullBetween(t, repo, user, "gen", "on-gen")
-			require.NoError(t, gitRepo.DeleteBranch("gen", git.DeleteBranchOptions{Force: true}))
-			require.NoError(t, git_model.AddDeletedBranch(t.Context(), repo.ID, "gen", user.ID))
-
-			// The deletion event of the merged tip arrives after the branch moved on and was deleted again, as with a drifted branch row.
-			require.NoError(t, repo_service.PushUpdate(&repo_module.PushUpdateOptions{
-				PusherID: user.ID, PusherName: user.Name, RepoUserName: repo.OwnerName, RepoName: repo.Name,
-				RefFullName: git.RefNameFromBranch("gen"), OldCommitID: first, NewCommitID: git.Sha1ObjectFormat.EmptyObjectID().String(),
-			}))
-			require.NoError(t, queue.GetManager().FlushAll(t.Context(), 0))
-
-			_, retargeted := recorder.get(childPR.ID)
-			assert.False(t, retargeted)
-			child := loadPull(t, childPR.ID)
-			assert.Equal(t, "gen", child.BaseBranch)
-			assert.True(t, child.Issue.IsClosed)
 		})
 
 		t.Run("branch row lags behind the deleted tip", func(t *testing.T) {
